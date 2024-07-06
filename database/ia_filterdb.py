@@ -1,4 +1,3 @@
-
 import logging
 from struct import pack, unpack
 from typing import Tuple
@@ -6,12 +5,12 @@ import base64
 import re
 from motor.motor_asyncio import AsyncIOMotorClient
 from pyrogram.file_id import FileId
-from pymongo.errors import DuplicateKeyError
+from pymongo.errors import OperationFailure, DuplicateKeyError
 from umongo import Instance, Document, fields
 from marshmallow.exceptions import ValidationError
 from info import DATABASE_URI, DATABASE_NAME, COLLECTION_NAME, USE_CAPTION_FILTER, MAX_B_TN, SECONDDB_URI
 from utils import get_settings, save_group_settings
-from sample_info import tempDict 
+from sample_info import tempDict
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -35,7 +34,6 @@ class Media(Document):
     caption = fields.StrField(allow_none=True)
 
     class Meta:
-        indexes = {'file_name': {'unique': True}}
         collection_name = COLLECTION_NAME
 
 # Secondary DB
@@ -54,24 +52,21 @@ class Media2(Document):
     caption = fields.StrField(allow_none=True)
 
     class Meta:
-        indexes = {'file_name': {'unique': True}}
         collection_name = COLLECTION_NAME
 
-async def ensure_indexes(collection, index_name, index_field):
-    existing_indexes = await collection.index_information()
+async def ensure_indexes():
+    async def create_index_if_not_exists(collection):
+        existing_indexes = await collection.index_information()
+        index_field = 'file_name'
+        index_exists = any(
+            index.get('key') == [(index_field, pymongo.ASCENDING)]
+            for index in existing_indexes.values()
+        )
+        if not index_exists:
+            await collection.create_index([(index_field, pymongo.ASCENDING)], name='file_name_1')
     
-    if index_name in existing_indexes:
-        if existing_indexes[index_name]['key'] != [(index_field, 1)]:
-            await collection.drop_index(index_name)
-        else:
-            # Index already exists and matches the required key
-            return
-    
-    await collection.create_index([(index_field, 1)], name=index_name)
-
-async def setup_indexes():
-    await ensure_indexes(db[COLLECTION_NAME], 'file_name_1', 'file_name')
-    await ensure_indexes(db2[COLLECTION_NAME], 'file_name_1', 'file_name')
+    await create_index_if_not_exists(db[COLLECTION_NAME])
+    await create_index_if_not_exists(db2[COLLECTION_NAME])
 
 async def choose_mediaDB():
     """This Function chooses which database to use based on the value of indexDB key in the dict tempDict."""
@@ -145,6 +140,10 @@ async def get_search_results(chat_id, query, file_type=None, max_results=10, off
             else:
                 max_results = int(MAX_B_TN)
     query = query.strip()
+    # if filter:
+    #     better ?
+    #     query = query.replace(' ', r'(\s|\.|\+|\-|_)')
+    #     raw_pattern = r'(\s|_|\-|\.|\+)' + query + r'(\s|_|\-|\.|\+)'
     if not query:
         raw_pattern = '.'
     elif ' ' not in query:
@@ -168,7 +167,7 @@ async def get_search_results(chat_id, query, file_type=None, max_results=10, off
     total_results = ((await Media.count_documents(filter))+(await Media2.count_documents(filter)))
 
     # Verifies max_results is an even number or not
-    if max_results % 2 != 0:  # If max_results is an odd number, add 1 to make it an even number
+    if max_results % 2 != 0:  # if max_results is an odd number, add 1 to make it an even number
         logger.info(f"Since max_results is an odd number ({max_results}), bot will use {max_results+1} as max_results to make it even.")
         max_results += 1
 
@@ -198,6 +197,10 @@ async def get_search_results(chat_id, query, file_type=None, max_results=10, off
 async def get_bad_files(query, file_type=None, filter=False):
     """For given query return (results, next_offset)"""
     query = query.strip()
+    # if filter:
+    #     better ?
+    #     query = query.replace(' ', r'(\s|\.|\+|\-|_)')
+    #     raw_pattern = r'(\s|_|\-|\.|\+)' + query + r'(\s|_|\-|\.|\+)'
     if not query:
         raw_pattern = '.'
     elif ' ' not in query:
@@ -224,9 +227,9 @@ async def get_bad_files(query, file_type=None, filter=False):
     cursor.sort('$natural', -1)
     cursor2.sort('$natural', -1)
     # Get list of files
-    files = ((await cursor2.to_list(length=(await Media2.count_documents(filter)))) + (await cursor.to_list(length=(await Media.count_documents(filter)))))
-
-    # Calculate total results
+    fileList2 = await cursor2.to_list(length=30000)
+    fileList1 = await cursor.to_list(length=30000)
+    files = fileList2 + fileList1
     total_results = len(files)
 
     return files, total_results
@@ -273,3 +276,6 @@ def unpack_new_file_id(new_file_id):
     )
     file_ref = encode_file_ref(decoded.file_reference)
     return file_id, file_ref
+
+# Ensure indexes during initialization
+await ensure_indexes()
